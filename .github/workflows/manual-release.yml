@@ -126,6 +126,28 @@ jobs:
           echo "⚠️ agent_templates/copilot folder not found"
         fi
         
+        # Create OpenAI Codex package
+        echo "Creating OpenAI Codex package..."
+        mkdir -p sdd-codex-package
+        cp -r sdd-package-base/* sdd-codex-package/
+        mkdir -p sdd-codex-package/.codex/prompts
+        if [ -d "templates/commands" ]; then
+          for template in templates/commands/*.md; do
+            name=$(basename "$template")
+            awk '/^---$/{if(++count==2) start=1; next} start' "$template" > "sdd-codex-package/.codex/prompts/$name"
+          done
+          echo "✓ Added Codex prompts from templates/commands ($(find templates/commands -type f | wc -l) files)"
+        fi
+        # Include a minimal CODEX.md
+        cat > sdd-codex-package/CODEX.md << 'EOF'
+# OpenAI Codex CLI - Quickstart
+
+Install: `npm i -g @openai/codex` or `brew install codex`.
+
+Use `codex` for interactive mode or `codex exec "<prompt>"` for one-off automation. This template ships with prompts under `.codex/prompts/` you can open and paste into Codex.
+EOF
+        
+        
         # Create archive files for each package
         echo "Creating archive files..."
         cd sdd-claude-package && zip -r ../spec-kit-template-claude-${{ steps.version.outputs.new_version }}.zip . && cd ..
@@ -139,7 +161,7 @@ jobs:
         echo "Claude: $(ls -lh spec-kit-template-claude-*.zip | awk '{print $5}')"
         echo "Gemini: $(ls -lh spec-kit-template-gemini-*.zip | awk '{print $5}')"
         echo "Copilot: $(ls -lh spec-kit-template-copilot-*.zip | awk '{print $5}')"
-        echo "Copilot: $(ls -lh sdd-template-copilot-*.zip | awk '{print $5}')"
+        echo "Codex:   $(ls -lh spec-kit-template-codex-*.zip | awk '{print $5}')"
         
     - name: Generate detailed release notes
       run: |
@@ -164,12 +186,13 @@ jobs:
         cat > release_notes.md << EOF
         Template release ${{ steps.version.outputs.new_version }}
         
-        Updated specification-driven development templates for GitHub Copilot, Claude Code, and Gemini CLI.
+        Updated specification-driven development templates for GitHub Copilot, Claude Code, Gemini CLI, and OpenAI Codex CLI.
         
         Download the template for your preferred AI assistant:
         - spec-kit-template-copilot-${{ steps.version.outputs.new_version }}.zip
         - spec-kit-template-claude-${{ steps.version.outputs.new_version }}.zip
         - spec-kit-template-gemini-${{ steps.version.outputs.new_version }}.zip  
+        - spec-kit-template-codex-${{ steps.version.outputs.new_version }}.zip  
         
         Changes since $LAST_TAG:
         $COMMITS
@@ -185,6 +208,7 @@ jobs:
           spec-kit-template-copilot-${{ steps.version.outputs.new_version }}.zip \
           spec-kit-template-claude-${{ steps.version.outputs.new_version }}.zip \
           spec-kit-template-gemini-${{ steps.version.outputs.new_version }}.zip \
+          spec-kit-template-codex-${{ steps.version.outputs.new_version }}.zip \
           --title "Spec Kit Templates - $VERSION_NO_V" \
           --notes-file release_notes.md
       env:
