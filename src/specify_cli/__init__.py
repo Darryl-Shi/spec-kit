@@ -390,8 +390,18 @@ def download_template_from_github(ai_assistant: str, download_dir: Path, *, verb
     """Download the latest template release from GitHub using HTTP requests.
     Returns (zip_path, metadata_dict)
     """
+    # Allow override of the release source repository via environment variable.
+    # By default, use the upstream repo. Override with SPEC_KIT_REPO="owner/name".
     repo_owner = "github"
     repo_name = "spec-kit"
+    override = os.environ.get("SPEC_KIT_REPO", "").strip()
+    if override and "/" in override:
+        try:
+            o, n = override.split("/", 1)
+            if o and n:
+                repo_owner, repo_name = o, n
+        except Exception:
+            pass
     
     if verbose:
         console.print("[cyan]Fetching latest release information...[/cyan]")
