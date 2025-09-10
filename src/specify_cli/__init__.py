@@ -23,6 +23,8 @@ Or install globally:
 """
 
 import os
+import logging
+from logging import Logger
 import subprocess
 import sys
 import zipfile
@@ -43,6 +45,7 @@ from rich.align import Align
 from rich.table import Table
 from rich.tree import Tree
 from typer.core import TyperGroup
+from platformdirs import user_log_dir
 
 # For cross-platform keyboard input
 import readchar
@@ -265,6 +268,62 @@ def select_with_arrows(options: dict, prompt_text: str = "Select an option", def
 
 
 console = Console()
+_LOGGING_CONFIGURED = False
+logger: Logger = logging.getLogger("specify")
+
+def setup_logging(verbosity: int = 0, log_file: str | None = None) -> None:
+    """Configure logging with Rich console output and optional file.
+
+    Verbosity levels:
+    - 0: WARNING (default)
+    - 1: INFO (-v)
+    - 2+: DEBUG (-vv)
+
+    If level is DEBUG and no log_file is provided, logs are written to a user
+    log directory determined by platformdirs.
+    """
+    global _LOGGING_CONFIGURED
+    # Environment overrides
+    env_debug = os.environ.get("SPECIFY_DEBUG")
+    env_level = (os.environ.get("SPECIFY_LOG_LEVEL") or "").upper()
+    if env_debug == "1" or env_level == "DEBUG":
+        verbosity = max(verbosity, 2)
+
+    # Compute level
+    level = logging.WARNING if verbosity <= 0 else (logging.INFO if verbosity == 1 else logging.DEBUG)
+
+    if _LOGGING_CONFIGURED:
+        logging.getLogger("specify").setLevel(level)
+        return
+
+    handlers: list[logging.Handler] = []
+    try:
+        from rich.logging import RichHandler  # type: ignore
+        handlers.append(RichHandler(console=console, show_path=False, rich_tracebacks=True))
+    except Exception:
+        handlers.append(logging.StreamHandler())
+
+    # Add file handler when in DEBUG (or if explicitly requested)
+    want_file = (level == logging.DEBUG) or bool(log_file)
+    if want_file:
+        if not log_file:
+            log_dir = Path(user_log_dir(appname="specify-cli", appauthor="specify"))
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_file = str(log_dir / "specify-init.log")
+        try:
+            fh = logging.FileHandler(log_file)
+            fh.setLevel(logging.DEBUG)
+            fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+            handlers.append(fh)
+        except Exception:
+            # Fall back to console-only if file can't be opened
+            pass
+
+    logging.basicConfig(level=level, format="%(message)s", handlers=handlers)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logger.debug("Logging initialized: level=%s file=%s", logging.getLevelName(level), log_file)
+    _LOGGING_CONFIGURED = True
 
 
 class BannerGroup(TyperGroup):
@@ -315,13 +374,17 @@ def callback(ctx: typer.Context):
 def run_command(cmd: list[str], check_return: bool = True, capture: bool = False, shell: bool = False) -> Optional[str]:
     """Run a shell command and optionally capture output."""
     try:
+        logger.debug("run_command: cmd=%s shell=%s capture=%s", cmd, shell, capture)
         if capture:
             result = subprocess.run(cmd, check=check_return, capture_output=True, text=True, shell=shell)
+            logger.debug("run_command: returncode=%s stdout=%s stderr=%s", result.returncode, result.stdout.strip(), (result.stderr or "").strip())
             return result.stdout.strip()
         else:
             subprocess.run(cmd, check=check_return, shell=shell)
+            logger.debug("run_command: completed without capture")
             return None
     except subprocess.CalledProcessError as e:
+        logger.error("run_command failed: cmd=%s returncode=%s stderr=%s", cmd, e.returncode, (e.stderr or "").strip() if hasattr(e, 'stderr') else "")
         if check_return:
             console.print(f"[red]Error running command:[/red] {' '.join(cmd)}")
             console.print(f"[red]Exit code:[/red] {e.returncode}")
@@ -334,8 +397,10 @@ def run_command(cmd: list[str], check_return: bool = True, capture: bool = False
 def check_tool(tool: str, install_hint: str) -> bool:
     """Check if a tool is installed."""
     if shutil.which(tool):
+        logger.debug("check_tool: %s found at %s", tool, shutil.which(tool))
         return True
     else:
+        logger.debug("check_tool: %s not found", tool)
         console.print(f"[yellow]⚠️  {tool} not found[/yellow]")
         console.print(f"   Install with: [cyan]{install_hint}[/cyan]")
         return False
@@ -357,8 +422,10 @@ def is_git_repo(path: Path = None) -> bool:
             capture_output=True,
             cwd=path,
         )
+        logger.debug("is_git_repo: %s -> True", path)
         return True
     except (subprocess.CalledProcessError, FileNotFoundError):
+        logger.debug("is_git_repo: %s -> False", path)
         return False
 
 
@@ -369,6 +436,7 @@ def init_git_repo(project_path: Path, quiet: bool = False) -> bool:
     try:
         original_cwd = Path.cwd()
         os.chdir(project_path)
+        logger.debug("init_git_repo: cwd=%s", project_path)
         if not quiet:
             console.print("[cyan]Initializing git repository...[/cyan]")
         subprocess.run(["git", "init"], check=True, capture_output=True)
@@ -376,6 +444,7 @@ def init_git_repo(project_path: Path, quiet: bool = False) -> bool:
         subprocess.run(["git", "commit", "-m", "Initial commit from Specify template"], check=True, capture_output=True)
         if not quiet:
             console.print("[green]✓[/green] Git repository initialized")
+        logger.debug("init_git_repo: initialized and committed")
         return True
         
     except subprocess.CalledProcessError as e:
@@ -384,6 +453,7 @@ def init_git_repo(project_path: Path, quiet: bool = False) -> bool:
         return False
     finally:
         os.chdir(original_cwd)
+        logger.debug("init_git_repo: restored cwd=%s", original_cwd)
 
 
 def download_template_from_github(ai_assistant: str, download_dir: Path, *, verbose: bool = True, show_progress: bool = True):
@@ -402,15 +472,22 @@ def download_template_from_github(ai_assistant: str, download_dir: Path, *, verb
                 repo_owner, repo_name = o, n
         except Exception:
             pass
+    logger.debug("download_template_from_github: repo=%s/%s ai=%s dir=%s", repo_owner, repo_name, ai_assistant, download_dir)
     
     if verbose:
         console.print("[cyan]Fetching latest release information...[/cyan]")
     api_url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/releases/latest"
+    logger.debug("GitHub API URL: %s", api_url)
     
     try:
         response = httpx.get(api_url, timeout=30, follow_redirects=True)
         response.raise_for_status()
         release_data = response.json()
+        try:
+            assets_list = [a.get("name") for a in release_data.get("assets", [])]
+        except Exception:
+            assets_list = []
+        logger.debug("release tag=%s assets=%s", release_data.get("tag_name"), assets_list)
     except httpx.RequestError as e:
         if verbose:
             console.print(f"[red]Error fetching release information:[/red] {e}")
@@ -436,6 +513,7 @@ def download_template_from_github(ai_assistant: str, download_dir: Path, *, verb
     download_url = asset["browser_download_url"]
     filename = asset["name"]
     file_size = asset["size"]
+    logger.debug("selected asset: %s size=%s url=%s", filename, file_size, download_url)
     
     if verbose:
         console.print(f"[cyan]Found template:[/cyan] {filename}")
@@ -446,11 +524,13 @@ def download_template_from_github(ai_assistant: str, download_dir: Path, *, verb
     zip_path = download_dir / filename
     if verbose:
         console.print(f"[cyan]Downloading template...[/cyan]")
+    logger.debug("downloading to: %s", zip_path)
     
     try:
         with httpx.stream("GET", download_url, timeout=30, follow_redirects=True) as response:
             response.raise_for_status()
             total_size = int(response.headers.get('content-length', 0))
+            logger.debug("httpx.stream content-length=%s", total_size)
             
             with open(zip_path, 'wb') as f:
                 if total_size == 0:
@@ -485,6 +565,7 @@ def download_template_from_github(ai_assistant: str, download_dir: Path, *, verb
         raise typer.Exit(1)
     if verbose:
         console.print(f"Downloaded: {filename}")
+    logger.debug("download complete: %s (%s bytes)", filename, file_size)
     metadata = {
         "filename": filename,
         "size": file_size,
@@ -499,6 +580,7 @@ def download_and_extract_template(project_path: Path, ai_assistant: str, is_curr
     Returns project_path. Uses tracker if provided (with keys: fetch, download, extract, cleanup)
     """
     current_dir = Path.cwd()
+    logger.debug("download_and_extract_template: project_path=%s here=%s ai=%s", project_path, is_current_dir, ai_assistant)
     
     # Step: fetch + download combined
     if tracker:
@@ -532,10 +614,12 @@ def download_and_extract_template(project_path: Path, ai_assistant: str, is_curr
         # Create project directory only if not using current directory
         if not is_current_dir:
             project_path.mkdir(parents=True)
+            logger.debug("created project directory: %s", project_path)
         
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
             # List all files in the ZIP for debugging
             zip_contents = zip_ref.namelist()
+            logger.debug("zip entries: %d first10=%s", len(zip_contents), zip_contents[:10])
             if tracker:
                 tracker.start("zip-list")
                 tracker.complete("zip-list", f"{len(zip_contents)} entries")
@@ -547,6 +631,7 @@ def download_and_extract_template(project_path: Path, ai_assistant: str, is_curr
                 with tempfile.TemporaryDirectory() as temp_dir:
                     temp_path = Path(temp_dir)
                     zip_ref.extractall(temp_path)
+                    logger.debug("extracted to temp: %s", temp_path)
                     
                     # Check what was extracted
                     extracted_items = list(temp_path.iterdir())
@@ -560,6 +645,7 @@ def download_and_extract_template(project_path: Path, ai_assistant: str, is_curr
                     source_dir = temp_path
                     if len(extracted_items) == 1 and extracted_items[0].is_dir():
                         source_dir = extracted_items[0]
+                        logger.debug("flattening nested dir: %s", source_dir)
                         if tracker:
                             tracker.add("flatten", "Flatten nested directory")
                             tracker.complete("flatten")
@@ -580,17 +666,21 @@ def download_and_extract_template(project_path: Path, ai_assistant: str, is_curr
                                         dest_file = dest_path / rel_path
                                         dest_file.parent.mkdir(parents=True, exist_ok=True)
                                         shutil.copy2(sub_item, dest_file)
+                                        logger.debug("merged file: %s", dest_file)
                             else:
                                 shutil.copytree(item, dest_path)
+                                logger.debug("copied dir: %s", dest_path)
                         else:
                             if dest_path.exists() and verbose and not tracker:
                                 console.print(f"[yellow]Overwriting file:[/yellow] {item.name}")
                             shutil.copy2(item, dest_path)
+                            logger.debug("copied file: %s", dest_path)
                     if verbose and not tracker:
                         console.print(f"[cyan]Template files merged into current directory[/cyan]")
             else:
                 # Extract directly to project directory (original behavior)
                 zip_ref.extractall(project_path)
+                logger.debug("extracted all to: %s", project_path)
                 
                 # Check what was extracted
                 extracted_items = list(project_path.iterdir())
@@ -606,6 +696,7 @@ def download_and_extract_template(project_path: Path, ai_assistant: str, is_curr
                 if len(extracted_items) == 1 and extracted_items[0].is_dir():
                     # Move contents up one level
                     nested_dir = extracted_items[0]
+                    logger.debug("flattening nested dir (new project): %s", nested_dir)
                     temp_move_dir = project_path.parent / f"{project_path.name}_temp"
                     # Move the nested directory contents to temp location
                     shutil.move(str(nested_dir), str(temp_move_dir))
@@ -642,6 +733,7 @@ def download_and_extract_template(project_path: Path, ai_assistant: str, is_curr
                 tracker.complete("cleanup")
             elif verbose:
                 console.print(f"Cleaned up: {zip_path.name}")
+        logger.debug("cleanup: removed zip=%s", zip_path)
     
     return project_path
 
@@ -653,6 +745,8 @@ def init(
     ignore_agent_tools: bool = typer.Option(False, "--ignore-agent-tools", help="Skip checks for AI agent tools like Claude Code"),
     no_git: bool = typer.Option(False, "--no-git", help="Skip git repository initialization"),
     here: bool = typer.Option(False, "--here", help="Initialize project in the current directory instead of creating a new one"),
+    verbose: int = typer.Option(0, "--verbose", "-v", count=True, help="Increase verbosity (-v=INFO, -vv=DEBUG)"),
+    log_file: Optional[Path] = typer.Option(None, "--log-file", help="Write logs to this file (implies -vv)"),
 ):
     """
     Initialize a new Specify project from the latest template.
@@ -677,6 +771,11 @@ def init(
     """
     # Show banner first
     show_banner()
+    # Initialize logging early so we capture everything that follows
+    if log_file is not None and verbose < 2:
+        verbose = 2  # ensure DEBUG level if file requested
+    setup_logging(verbose, str(log_file) if log_file else None)
+    logger.info("specify init start: here=%s project_name=%s ai=%s no_git=%s ignore_agent_tools=%s", here, project_name, ai_assistant, no_git, ignore_agent_tools)
     
     # Validate arguments
     if here and project_name:
@@ -691,6 +790,7 @@ def init(
     if here:
         project_name = Path.cwd().name
         project_path = Path.cwd()
+        logger.debug("init: using current directory: %s", project_path)
         
         # Check if current directory has any files
         existing_items = list(project_path.iterdir())
@@ -709,6 +809,7 @@ def init(
         if project_path.exists():
             console.print(f"[red]Error:[/red] Directory '{project_name}' already exists")
             raise typer.Exit(1)
+        logger.debug("init: new project directory planned: %s", project_path)
     
     console.print(Panel.fit(
         "[bold cyan]Specify Project Setup[/bold cyan]\n"
@@ -759,6 +860,7 @@ def init(
             console.print("\n[red]Required AI tool is missing![/red]")
             console.print("[yellow]Tip:[/yellow] Use --ignore-agent-tools to skip this check")
             raise typer.Exit(1)
+    logger.info("selected AI: %s (ignore_agent_tools=%s)", selected_ai, ignore_agent_tools)
     
     # Download and set up project
     # New tree-based progress (no emojis); include earlier substeps
@@ -806,6 +908,7 @@ def init(
             tracker.complete("final", "project ready")
         except Exception as e:
             tracker.error("final", str(e))
+            logger.exception("init failed: %s", e)
             if not here and project_path.exists():
                 shutil.rmtree(project_path)
             raise typer.Exit(1)
