@@ -461,8 +461,9 @@ def download_template_from_github(ai_assistant: str, download_dir: Path, *, verb
     Returns (zip_path, metadata_dict)
     """
     # Allow override of the release source repository via environment variable.
-    # By default, use the upstream repo. Override with SPEC_KIT_REPO="owner/name".
-    repo_owner = "github"
+    # Default to the maintainer's fork. Override with SPEC_KIT_REPO="owner/name" if needed.
+    # Note: Previously defaulted to "github/spec-kit".
+    repo_owner = "Darryl-Shi"
     repo_name = "spec-kit"
     override = os.environ.get("SPEC_KIT_REPO", "").strip()
     if override and "/" in override:
